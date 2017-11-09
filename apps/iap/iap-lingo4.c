@@ -46,6 +46,9 @@
             return; \
         }} while(0)
 
+/* Used to keep track of last repeat mode requested by iPod */
+static unsigned char fakerepeatmode = 0;
+
 /* Used to remember the last Type and Record requested */
 static char cur_dbrecord[5] = {0};
 
@@ -2329,13 +2332,8 @@ void iap_handlepkt_mode4(const unsigned int len, const unsigned char *buf)
              *  6   0xCA  Telegram payload checksum byte
              *
              */
-            unsigned char data[] = {0x04, 0x00, 0x30, 0x00};
-            if(global_settings.repeat_mode == REPEAT_OFF)
-                data[3] = 0;
-            else if(global_settings.repeat_mode == REPEAT_ONE)
-                data[3] = 1;
-            else
-                data[3] = 2;
+			unsigned char data[] = {0x04, 0x00, 0x30, 0x00};
+            data[3] = fakerepeatmode;
             iap_send_pkt(data, sizeof(data));
             break;
         }
@@ -2416,20 +2414,7 @@ void iap_handlepkt_mode4(const unsigned int len, const unsigned char *buf)
              *  7   0xNN  Telegram payload checksum byte
              *
              */
-            int oldmode = global_settings.repeat_mode;
-            if (buf[3] == 0)
-                global_settings.repeat_mode = REPEAT_OFF;
-            else if (buf[3] == 1)
-                global_settings.repeat_mode = REPEAT_ONE;
-            else if (buf[3] == 2)
-                global_settings.repeat_mode = REPEAT_ALL;
-
-            if (oldmode != global_settings.repeat_mode)
-            {
-                settings_save();
-                if (audio_status() & AUDIO_STATUS_PLAY)
-                    audio_flush_and_reload_tracks();
-            }
+            fakerepeatmode = buf[3];
             /* respond with cmd ok packet */
             cmd_ok(cmd);
             break;
