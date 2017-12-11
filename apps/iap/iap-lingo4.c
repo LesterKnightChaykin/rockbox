@@ -1554,8 +1554,14 @@ void iap_handlepkt_mode4(const unsigned int len, const unsigned char *buf)
             put_u32(&data[7], time_elapsed);
             if (status == AUDIO_STATUS_PLAY)
                 data[11] = 0x01; /* play */
+#ifdef LOGF_ENABLE
+        logf("iap: Returning play status: PLAY");
+#endif
             else if (status & AUDIO_STATUS_PAUSE)
                 data[11] = 0x02; /* pause */
+#ifdef LOGF_ENABLE
+        logf("iap: Returning play status: PAUSE");
+#endif
             iap_send_pkt(data, sizeof(data));
             break;
         }
@@ -2006,6 +2012,15 @@ void iap_handlepkt_mode4(const unsigned int len, const unsigned char *buf)
              */
         {
             int paused = (is_wps_fading() || (audio_status() & AUDIO_STATUS_PAUSE));
+			
+#ifdef LOGF_ENABLE
+			if (paused) {
+				logf("iap: PlayCurrentSelection - paused is true");
+			} else {
+				logf("iap: PlayCurrentSelection - paused is false");
+			}
+#endif
+			
             uint32_t index;
             uint32_t trackcount;
             index = get_u32(&buf[3]);
@@ -2072,6 +2087,9 @@ void iap_handlepkt_mode4(const unsigned int len, const unsigned char *buf)
                 case 0x01: /* play/pause */
                     iap_remotebtn = BUTTON_RC_PLAY;
                     iap_repeatbtn = 2;
+#ifdef LOGF_ENABLE
+				logf("iap: PlayControl - play/pause received");
+#endif
                     break;
                 case 0x02: /* stop */
                     iap_remotebtn = BUTTON_RC_PLAY|BUTTON_REPEAT;
@@ -2087,12 +2105,21 @@ void iap_handlepkt_mode4(const unsigned int len, const unsigned char *buf)
                     break;
                 case 0x05: /* ffwd */
                     iap_remotebtn = BUTTON_RC_RIGHT;
+#ifdef LOGF_ENABLE
+				logf("iap: PlayControl - ffwd received");
+#endif
                     break;
                 case 0x06: /* frwd */
                     iap_remotebtn = BUTTON_RC_LEFT;
+#ifdef LOGF_ENABLE
+				logf("iap: PlayControl - rwnd received");
+#endif
                     break;
                 case 0x07: /* end ffwd/frwd */
                     iap_remotebtn = BUTTON_NONE;
+#ifdef LOGF_ENABLE
+				logf("iap: PlayControl - end ffwd/rwnd received");
+#endif
                     break;
             }
             /* respond with cmd ok packet */
