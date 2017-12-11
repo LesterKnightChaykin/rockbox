@@ -43,6 +43,8 @@
 /* #define LOGF_ENABLE */
 #include "logf.h"
 
+#define BUF_MAX_HANDLES 384
+
 /* macros to enable logf for queues
    logging on SYS_TIMEOUT can be disabled */
 #ifdef SIMULATOR
@@ -80,13 +82,13 @@ enum handle_flags
 
 struct memory_handle {
     struct lld_node hnode;  /* Handle list node (first!) */
-    struct lld_node mrunode;/* MRU list node */
-    int     id;             /* A unique ID for the handle (after list!) */
+    struct lld_node mrunode;/* MRU list node (second!) */
+    size_t  size;           /* Size of this structure + its auxilliary data */
+    int     id;             /* A unique ID for the handle */
     enum data_type type;    /* Type of data buffered with this handle */
     uint8_t flags;          /* Handle property flags */
     int8_t  pinned;         /* Count of pinnings */
     int8_t  signaled;       /* Stop any attempt at waiting to get the data */
-    char    path[MAX_PATH]; /* Path if data originated in a file */
     int     fd;             /* File descriptor to path (-1 if closed) */
     size_t  data;           /* Start index of the handle's data buffer */
     size_t  ridx;           /* Read pointer, relative to the main buffer */
@@ -95,7 +97,11 @@ struct memory_handle {
     off_t   start;          /* Offset at which we started reading the file */
     off_t   pos;            /* Read position in file */
     off_t volatile end;     /* Offset at which we stopped reading the file */
+    char    path[];         /* Path if data originated in a file */
 };
+
+/* Minimum allowed handle movement */
+#define MIN_MOVE_DELTA      sizeof(struct memory_handle)
 
 struct buf_message_data
 {
@@ -129,6 +135,9 @@ static struct mutex llist_mutex SHAREDBSS_ATTR;
 
 #define HLIST_LAST \
     HLIST_HANDLE(handle_list.tail)
+
+#define HLIST_PREV(h) \
+    HLIST_HANDLE((h)->hnode.prev)
 
 #define HLIST_NEXT(h) \
     HLIST_HANDLE((h)->hnode.next)
@@ -339,7 +348,8 @@ static void adjust_handle_node(struct lld_head *list,
            NULL if there memory_handle itself cannot be allocated or if the
            data_size cannot be allocated and alloc_all is set. */
 static struct memory_handle *
-add_handle(unsigned int flags, size_t data_size, size_t *data_out)
+add_handle(unsigned int flags, size_t data_size, const char *path,
+           size_t *data_out)
 {
     /* Gives each handle a unique id */
     if (num_handles >= BUF_MAX_HANDLES)
@@ -371,14 +381,17 @@ add_handle(unsigned int flags, size_t data_size, size_t *data_out)
     }
 
     /* Align to align size up */
+    size_t pathsize = path ? strlen(path) + 1 : 0;
     size_t adjust = ALIGN_UP(widx, alignof(struct memory_handle)) - widx;
     size_t index = ringbuf_add(widx, adjust);
-    size_t len = data_size + sizeof(struct memory_handle);
+    size_t handlesize = ALIGN_UP(sizeof(struct memory_handle) + pathsize,
+                                 alignof(struct memory_handle));
+    size_t len = handlesize + data_size;
 
     /* First, will the handle wrap? */
     /* If the handle would wrap, move to the beginning of the buffer,
      * or if the data must not but would wrap, move it to the beginning */
-    if (index + sizeof(struct memory_handle) > buffer_len ||
+    if (index + handlesize > buffer_len ||
         (!(flags & H_CANWRAP) && index + len > buffer_len)) {
         index = 0;
     }
@@ -400,13 +413,17 @@ add_handle(unsigned int flags, size_t data_size, size_t *data_out)
     /* There is enough space for the required data, initialize the struct */
     struct memory_handle *h = ringbuf_ptr(index);
 
+    h->size     = handlesize;
     h->id       = next_handle_id();
     h->flags    = flags;
     h->pinned   = 0; /* Can be moved */
     h->signaled = 0; /* Data can be waited for */
 
+    /* Save the provided path */
+    memcpy(h->path, path, pathsize);
+
     /* Return the start of the data area */
-    *data_out = ringbuf_add(index, sizeof (struct memory_handle));
+    *data_out = ringbuf_add(index, handlesize);
 
     return h;
 }
@@ -452,13 +469,13 @@ static bool move_handle(struct memory_handle **h, size_t *delta,
     if (h == NULL || (src = *h) == NULL)
         return false;
 
-    size_t size_to_move = sizeof(struct memory_handle) + data_size;
+    size_t size_to_move = src->size + data_size;
 
     /* Align to align size down */
     size_t final_delta = *delta;
     final_delta = ALIGN_DOWN(final_delta, alignof(struct memory_handle));
-    if (final_delta < sizeof(struct memory_handle)) {
-        /* It's not legal to move less than the size of the struct */
+    if (final_delta < MIN_MOVE_DELTA) {
+        /* It's not legal to move less than MIN_MOVE_DELTA */
         return false;
     }
 
@@ -485,8 +502,8 @@ static bool move_handle(struct memory_handle **h, size_t *delta,
         if (correction) {
             /* Align correction to align size up */
             correction = ALIGN_UP(correction, alignof(struct memory_handle));
-            if (final_delta < correction + sizeof(struct memory_handle)) {
-                /* Delta cannot end up less than the size of the struct */
+            if (final_delta < correction + MIN_MOVE_DELTA) {
+                /* Delta cannot end up less than MIN_MOVE_DELTA */
                 return false;
             }
             newpos -= correction;
@@ -737,10 +754,10 @@ static bool close_handle(int handle_id)
 
 /* Free buffer space by moving the handle struct right before the useful
    part of its data buffer or by moving all the data. */
-static void shrink_handle(struct memory_handle *h)
+static struct memory_handle * shrink_handle(struct memory_handle *h)
 {
     if (!h)
-        return;
+        return NULL;
 
     if (h->type == TYPE_PACKET_AUDIO) {
         /* only move the handle struct */
@@ -751,14 +768,14 @@ static void shrink_handle(struct memory_handle *h)
 
         /* The value of delta might change for alignment reasons */
         if (!move_handle(&h, &delta, 0))
-            return;
+            return h;
 
         h->data = ringbuf_add(h->data, delta);
         h->start += delta;
     } else {
         /* metadata handle: we can move all of it */
         if (h->pinned || !HLIST_NEXT(h))
-            return; /* Pinned, last handle */
+            return h; /* Pinned, last handle */
 
         size_t data_size = h->filesize - h->start;
         uintptr_t handle_distance =
@@ -767,7 +784,7 @@ static void shrink_handle(struct memory_handle *h)
 
         /* The value of delta might change for alignment reasons */
         if (!move_handle(&h, &delta, data_size))
-            return;
+            return h;
 
         size_t olddata = h->data;
         h->data = ringbuf_add(h->data, delta);
@@ -794,6 +811,8 @@ static void shrink_handle(struct memory_handle *h)
                 break;
         }
     }
+
+    return h;
 }
 
 /* Fill the buffer by buffering as much data as possible for handles that still
@@ -804,8 +823,7 @@ static bool fill_buffer(void)
     logf("fill_buffer()");
     mutex_lock(&llist_mutex);
 
-    struct memory_handle *m = HLIST_FIRST;
-    shrink_handle(m);
+    struct memory_handle *m = shrink_handle(HLIST_FIRST);
 
     mutex_unlock(&llist_mutex);
 
@@ -912,13 +930,12 @@ int bufopen(const char *file, size_t offset, enum data_type type,
         /* ID3 case: allocate space, init the handle and return. */
         mutex_lock(&llist_mutex);
 
-        h = add_handle(H_ALLOCALL, sizeof(struct mp3entry), &data);
+        h = add_handle(H_ALLOCALL, sizeof(struct mp3entry), file, &data);
 
         if (h) {
             handle_id = h->id;
 
             h->type     = type;
-            strlcpy(h->path, file, MAX_PATH);
             h->fd       = -1;
             h->data     = data;
             h->ridx     = data;
@@ -977,7 +994,7 @@ int bufopen(const char *file, size_t offset, enum data_type type,
 
     mutex_lock(&llist_mutex);
 
-    h = add_handle(hflags, padded_size, &data);
+    h = add_handle(hflags, padded_size, file, &data);
     if (!h) {
         DEBUGF("%s(): failed to add handle\n", __func__);
         mutex_unlock(&llist_mutex);
@@ -988,7 +1005,6 @@ int bufopen(const char *file, size_t offset, enum data_type type,
     handle_id = h->id;
 
     h->type = type;
-    strlcpy(h->path, file, MAX_PATH);
     h->fd   = -1;
 
 #ifdef STORAGE_WANTS_ALIGN
@@ -1074,7 +1090,7 @@ int bufalloc(const void *src, size_t size, enum data_type type)
     mutex_lock(&llist_mutex);
 
     size_t data;
-    struct memory_handle *h = add_handle(H_ALLOCALL, size, &data);
+    struct memory_handle *h = add_handle(H_ALLOCALL, size, NULL, &data);
 
     if (h) {
         handle_id = h->id;
@@ -1089,7 +1105,6 @@ int bufalloc(const void *src, size_t size, enum data_type type)
         }
 
         h->type      = type;
-        h->path[0]   = '\0';
         h->fd        = -1;
         h->data      = data;
         h->ridx      = data;
@@ -1120,6 +1135,10 @@ bool bufclose(int handle_id)
         return true;
     }
 #endif
+    if (handle_id <= 0) {
+        return true;
+    }
+
     LOGFQUEUE("buffering >| Q_CLOSE_HANDLE %d", handle_id);
     return queue_send(&buffering_queue, Q_CLOSE_HANDLE, handle_id);
 }
@@ -1577,21 +1596,16 @@ size_t buf_get_watermark(void)
 }
 
 /** -- buffer thread helpers -- **/
-static void shrink_buffer_inner(struct memory_handle *h)
-{
-    if (h == NULL)
-        return;
-
-    shrink_buffer_inner(HLIST_NEXT(h));
-
-    shrink_handle(h);
-}
-
 static void shrink_buffer(void)
 {
     logf("shrink_buffer()");
+
     mutex_lock(&llist_mutex);
-    shrink_buffer_inner(HLIST_FIRST);
+
+    for (struct memory_handle *h = HLIST_LAST; h; h = HLIST_PREV(h)) {
+        h = shrink_handle(h);
+    }
+
     mutex_unlock(&llist_mutex);
 }
 

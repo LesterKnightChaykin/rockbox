@@ -1164,10 +1164,10 @@ static void trim_rect(int *x, int *y, int *w, int *h)
     int screenh = zoom_enabled ? zoom_h : LCD_HEIGHT;
 
     /* Clip each coordinate at both extremes of the canvas */
-    x0 = (x0 < 0 ? 0 : x0 > screenw - 1 ? screenw - 1: x0);
-    x1 = (x1 < 0 ? 0 : x1 > screenw - 1 ? screenw - 1: x1);
-    y0 = (y0 < 0 ? 0 : y0 > screenh - 1 ? screenh - 1: y0);
-    y1 = (y1 < 0 ? 0 : y1 > screenh - 1 ? screenh - 1: y1);
+    x0 = (x0 < 0 ? 0 : x0 > screenw ? screenw: x0);
+    x1 = (x1 < 0 ? 0 : x1 > screenw ? screenw: x1);
+    y0 = (y0 < 0 ? 0 : y0 > screenh ? screenh: y0);
+    y1 = (y1 < 0 ? 0 : y1 > screenh ? screenh: y1);
 
     /* Transform back into x,y,w,h to return */
     *x = x0;
@@ -1585,6 +1585,8 @@ static int process_input(int tmo, bool do_pausemenu)
      * following code is needed for mouse mode. */
     if(mouse_mode)
     {
+        static int last_mousedir = 0, held_count = 0, v = 1;
+
         if(button & BTN_UP)
             state = CURSOR_UP;
         else if(button & BTN_DOWN)
@@ -1599,6 +1601,32 @@ static int process_input(int tmo, bool do_pausemenu)
 
         last_keystate = button;
 
+        /* move */
+        /* get the direction vector the cursor is moving in. */
+        int new_x = mouse_x, new_y = mouse_y;
+
+        /* in src/misc.c */
+        move_cursor(state, &new_x, &new_y, LCD_WIDTH, LCD_HEIGHT, FALSE);
+
+        int dx = new_x - mouse_x, dy = new_y - mouse_y;
+
+        mouse_x += dx * v;
+        mouse_y += dy * v;
+
+        /* clamp */
+        /* The % operator with negative operands is messy; this is much
+         * simpler. */
+        if(mouse_x < 0)
+            mouse_x = 0;
+        if(mouse_y < 0)
+            mouse_y = 0;
+
+        if(mouse_x >= LCD_WIDTH)
+            mouse_x = LCD_WIDTH - 1;
+        if(mouse_y >= LCD_HEIGHT)
+            mouse_y = LCD_HEIGHT - 1;
+
+        /* clicking/dragging */
         /* rclick on hold requires that we fire left-click on a
          * release, otherwise it's impossible to distinguish the
          * two. */
@@ -1620,8 +1648,6 @@ static int process_input(int tmo, bool do_pausemenu)
                 send_click(LEFT_DRAG, false);
         }
 
-        static int last_mousedir = 0, held_count = 0, v = 0;
-
         /* acceleration */
         if(state && state == last_mousedir)
         {
@@ -1639,29 +1665,6 @@ static int process_input(int tmo, bool do_pausemenu)
             v = 1;
             held_count = 0;
         }
-
-        /* get the direction vector the cursor is moving in. */
-        int new_x = mouse_x, new_y = mouse_y;
-
-        /* in src/misc.c */
-        move_cursor(state, &new_x, &new_y, LCD_WIDTH, LCD_HEIGHT, FALSE);
-
-        int dx = new_x - mouse_x, dy = new_y - mouse_y;
-
-        mouse_x += dx * v;
-        mouse_y += dy * v;
-
-        /* The % operator with negative operands is messy; this is much
-         * simpler. */
-        if(mouse_x < 0)
-            mouse_x = 0;
-        if(mouse_y < 0)
-            mouse_y = 0;
-
-        if(mouse_x >= LCD_WIDTH)
-            mouse_x = LCD_WIDTH - 1;
-        if(mouse_y >= LCD_HEIGHT)
-            mouse_y = LCD_HEIGHT - 1;
 
         /* no buttons are sent to the midend in mouse mode */
         return 0;
@@ -2798,7 +2801,7 @@ static void tune_input(const char *name)
         NULL
     };
 
-    input_settings.ignore_repeats = !string_in_list(name, falling_edge);
+    input_settings.ignore_repeats = !string_in_list(name, ignore_repeats);
 
     /* set to false if you want dragging to be possible */
     static const char *rclick_on_hold[] = {
@@ -2808,7 +2811,7 @@ static void tune_input(const char *name)
         NULL
     };
 
-    input_settings.rclick_on_hold = !string_in_list(name, falling_edge);
+    input_settings.rclick_on_hold = !string_in_list(name, rclick_on_hold);
 
     static const char *mouse_games[] = {
         "Loopy",
