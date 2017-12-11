@@ -1552,16 +1552,17 @@ void iap_handlepkt_mode4(const unsigned int len, const unsigned char *buf)
             int status = audio_status();
             put_u32(&data[3], time_total);
             put_u32(&data[7], time_elapsed);
-            if (status == AUDIO_STATUS_PLAY)
+            if (status == AUDIO_STATUS_PLAY) {
                 data[11] = 0x01; /* play */
 #ifdef LOGF_ENABLE
-        logf("iap: Returning play status: PLAY");
+				logf("iap: Returning play status: PLAY");
 #endif
-            else if (status & AUDIO_STATUS_PAUSE)
+            } else if (status & AUDIO_STATUS_PAUSE) {
                 data[11] = 0x02; /* pause */
 #ifdef LOGF_ENABLE
-        logf("iap: Returning play status: PAUSE");
-#endif
+				logf("iap: Returning play status: PAUSE");
+#endif		
+			}
             iap_send_pkt(data, sizeof(data));
             break;
         }
