@@ -247,3 +247,6 @@
 
 /* Define this if a programmable hotkey is mapped */
 #define HAVE_HOTKEY
+
+/* Enable Logf for IAP debugging */
+#define ROCKBOX_HAS_LOGF
